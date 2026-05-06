@@ -1,0 +1,17 @@
+# XAUT/USDT Pro Bot v2.0 — Dependencies
+# Install: pip install -r requirements.txt
+
+# Core trading
+requests>=2.31.0
+pandas>=2.0.0
+pandas-ta-remake
+python-dotenv>=1.0.0
+
+# WebSocket real-time feed
+websocket-client>=1.7.0
+
+# Web dashboard (opsional)
+flask>=3.0.0
+
+# Logging & utils (sudah built-in Python, listed for clarity)
+# hmac, hashlib, threading, json, csv — stdlib
