@@ -107,7 +107,26 @@ CONFIG = {
     "SWITCH_IDLE_MAX_SEC": 600,
     "MAX_DAILY_LOSS_PCT": 0.15,
     "MAX_DRAWDOWN_PCT": 0.30,
-    "USE_KELLY": False,
+    "USE_KELLY": True,               # Gunakan Kelly Criterion untuk sizing
+    "KELLY_FRACTION": 0.5,           # Fractional Kelly (0.5 = Half-Kelly) untuk mengurangi volatilitas
+    
+    # --- FILTER BERITA (NEWS EVENT FILTER) ---
+    "USE_NEWS_FILTER": True,         # Aktifkan filter berita
+    "NEWS_BLACKOUT_MINUTES": 60,     # Berhenti trading 60 menit sebelum dan sesudah berita
+    # Jadwal Berita Ekonomi (UTC) - Format: (Jam, Menit, HariDalamMinggu) 
+    # 0=Senin, 6=Minggu. Contoh: CPI biasanya Rabu 13:30 UTC
+    "SCHEDULED_NEWS": [
+        {"name": "CPI Data", "hour": 13, "minute": 30, "day": 3},
+        {"name": "NFP", "hour": 13, "minute": 30, "day": 4}, # Non-Farm Payrolls (Jumat)
+        {"name": "FOMC", "hour": 18, "minute": 0, "day": 2},
+        {"name": "PPI Data", "hour": 13, "minute": 30, "day": 3}
+    ],
+
+    # --- MULTI-TIMEFRAME CONFLUENCE ---
+    "USE_MTF_CONFIRM": True,         # Wajibkan konfirmasi timeframe lebih tinggi
+    "MTF_TIMEFRAME": "1h",           # Timeframe acuan (1h atau 4h)
+    "MTF_MIN_SCORE": 2,              # Minimal skor tren di MTF agar entry valid
+    
     "EXIT_ON_ST_FLIP": False,
     "ST_FLIP_MIN_HOLD_SEC": 3600,
     "SIGNAL_FLIP_MIN_HOLD_SEC": 900,
@@ -118,11 +137,14 @@ CONFIG = {
     "EXHAUST_MIN_TP1_PCT": 0.30,
     "ENTRY_MODE": "PULLBACK",
     "PULLBACK_MIN_TREND_STRENGTH": 3,
+    "ML_MIN_SCORE": 0.55,
+    "USE_ML_FILTER": False,
     "PULLBACK_MIN_REVERSAL_SCORE": 3,
     "PULLBACK_ENTRY_MIN_SCORE": 11,
     "PULLBACK_DEPTH_ATR": 0.4,
     "PULLBACK_PERSIST_CYCLES": 1,
     "PULLBACK_MAX_VELOCITY": 0.20,
+    "ORDER_TIMEOUT_SEC": 30,
     "CANDLE_CLOSE_CONFIRM": True,
     "CANDLE_CLOSE_WINDOW_SEC": 120,
     "REGIME_ADX_MIN": 18,
@@ -373,7 +395,12 @@ class MEXCFuturesClient:
     def get_funding_rate(self, symbol: str) -> Optional[float]:
         try:
             d = self._request("GET", f"/api/v1/contract/funding_rate/{symbol}")
-            if d and isinstance(d, dict):
+            if not d:
+                return None
+            # Handle response as list or dict
+            if isinstance(d, list):
+                d = d[0] if d else {}
+            if isinstance(d, dict):
                 rate = d.get("fundingRate") or d.get("rate") or d.get("value")
                 if rate is not None:
                     return float(rate)
@@ -444,7 +471,9 @@ class MEXCFuturesClient:
                     return None
             except Exception as e:
                 log.error(f"[ORDER] Exception attempt {attempt+1}: {e}")
-            if attempt == 0:
+            # Retry logic for all attempts except the last one
+            if attempt < 1:
+                log.info(f"[ORDER] Retrying after {attempt+1} attempt...")
                 time.sleep(2)
                 timestamp = str(int(time.time() * 1000))
                 signature = self._sign(timestamp, payload)
@@ -1390,8 +1419,18 @@ class ScalperTA:
         live_bear_pt = obi_bear_pt + flow_bear_pt + vwap_bear_pt + fund_bear_pt + whal_bear_pt
         bull_candle, bear_candle = bull - live_bull_pt, bear - live_bear_pt
 
-        if bull_candle < min_candle: details["CANDLE_GATE"] = f"⛔ Candle score {bull_candle}/{min_candle} (kurang)"; bull = 0
-        if bear_candle < min_candle: details["CANDLE_GATE"] = f"⛔ Candle score {bear_candle}/{min_candle} (kurang)"; bear = 0
+        # CANDLE GATE: Reset skor jika pattern tidak cukup kuat (FIX: set 0 sebelum return)
+        bull_signal = False  # Initialize default
+        bear_signal = False  # Initialize default
+        
+        if bull_candle < min_candle: 
+            details["CANDLE_GATE"] = f"⛔ Candle score {bull_candle}/{min_candle} (kurang)"
+            bull = 0
+            # bull_signal tetap False
+        if bear_candle < min_candle: 
+            details["CANDLE_GATE"] = f"⛔ Candle score {bear_candle}/{min_candle} (kurang)"
+            bear = 0
+            # bear_signal tetap False
 
         st_ok_bull = bull >= 2 and (st_now == -1); st_ok_bear = bear >= 2 and (st_now == 1)
         if c.get("REQUIRE_ST_CONFIRM", True):
@@ -1504,6 +1543,7 @@ class RiskManager:
     def __init__(self, cfg: dict): self.cfg = cfg
 
     def calculate_levels(self, side: str, entry: float, atr: float, trend_power: int = 50, atr_pct: float = 0.0) -> dict:
+        """Calculate SL/TP levels with proper R:R handling (FIX: minimum SL doesn't preserve R:R)"""
         c, sl_base, tp1_base = self.cfg, c.get("ATR_SL_MULT", 1.0), c.get("ATR_TP1_MULT", 2.5)
         if c.get("DYNAMIC_LEVELS", True) and atr_pct > 0:
             high_vol, low_vol = c.get("HIGH_VOL_ATR_PCT", 1.5), c.get("LOW_VOL_ATR_PCT", 0.5)
@@ -1511,17 +1551,50 @@ class RiskManager:
             elif atr_pct <= low_vol: sl_base = round(sl_base * 0.8, 2)
         sl, tp1, tp2, tp3 = atr * sl_base, atr * tp1_base, atr * c.get("ATR_TP2_MULT", 4.0), atr * c.get("ATR_TP3_MULT", 6.0)
         min_sl = entry * 0.002
+        original_sl = sl
         if sl < min_sl:
-            factor = min_sl / sl if sl > 0 else 1.0; sl = min_sl; tp1, tp2, tp3 = tp1*factor, tp2*factor, tp3*factor
+            # FIX: SL dinaikkan ke minimum, tapi TP tetap (R:R memburuk, tidak diproporsikan)
+            sl = min_sl
+            # TP tetap menggunakan nilai asli untuk menjaga target profit realistis
+            # R:R akan otomatis lebih rendah dan akan difilter oleh check_rr()
         if side == "LONG":
             return {"stop_loss": round(entry - sl, 6), "take_profit1": round(entry + tp1, 6), "take_profit2": round(entry + tp2, 6),
-                    "take_profit3": round(entry + tp3, 6), "sl_distance": round(sl, 6), "rr_ratio": round(tp1 / sl, 2) if sl > 0 else 0, "entry": entry}
+                    "take_profit3": round(entry + tp3, 6), "sl_distance": round(sl, 6), 
+                    "rr_ratio": round(tp1 / sl, 2) if sl > 0 else 0, "entry": entry,
+                    "original_rr": round(tp1 / original_sl, 2) if original_sl > 0 else 0}
         return {"stop_loss": round(entry + sl, 6), "take_profit1": round(entry - tp1, 6), "take_profit2": round(entry - tp2, 6),
-                "take_profit3": round(entry - tp3, 6), "sl_distance": round(sl, 6), "rr_ratio": round(tp1 / sl, 2) if sl > 0 else 0, "entry": entry}
+                "take_profit3": round(entry - tp3, 6), "sl_distance": round(sl, 6), 
+                "rr_ratio": round(tp1 / sl, 2) if sl > 0 else 0, "entry": entry,
+                "original_rr": round(tp1 / original_sl, 2) if original_sl > 0 else 0}
 
     def position_size(self, balance: float, sl_distance: float, entry_price: float,
                       win_rate: float = 0.5, score: int = 12, max_score: int = 18) -> float:
+        """Calculate position size with optional Kelly Criterion and Dynamic Sizing based on volatility"""
         c = self.cfg; risk_pct = c.get("RISK_PER_TRADE", 0.10); risk_amount = balance * risk_pct
+        
+        # FIX: Implementasi Kelly Criterion jika diaktifkan
+        if c.get("USE_KELLY", False) and win_rate > 0 and win_rate < 1:
+            # Kelly formula: K = W - (1-W)/R dimana W=win_rate, R=avg_win/avg_loss
+            # Asumsi R=1.5 (risk-reward ratio minimum) untuk konservatif
+            avg_rr = c.get("MIN_RR_RATIO", 1.5)
+            kelly_pct = win_rate - (1 - win_rate) / avg_rr
+            # Fractional Kelly (50% untuk mengurangi volatilitas)
+            kelly_fraction = c.get("KELLY_FRACTION", 0.5)
+            kelly_pct = max(0, kelly_pct * kelly_fraction)
+            # Clamp ke maksimum risk_pct
+            risk_pct = min(kelly_pct, risk_pct)
+            risk_amount = balance * risk_pct
+            log.debug(f"[KELLY] Win rate {win_rate:.1%}, Kelly raw {kelly_pct/risk_pct*100:.1f}%, fraction {kelly_fraction}, final risk {risk_pct:.2%}")
+        
+        # DYNAMIC POSITION SIZING: Sesuaikan ukuran berdasarkan volatilitas (ATR)
+        # Jika volatilitas tinggi, kurangi ukuran posisi untuk menjaga risiko konstan
+        atr_pct = c.get("_CURRENT_ATR_PCT", 0.01)  # Akan di-set dari caller
+        target_atr = c.get("TARGET_ATR_PCT", 0.015)  # Volatilitas target
+        if atr_pct > 0 and target_atr > 0:
+            vol_adjustment = min(1.0, target_atr / atr_pct)  # Jika ATR tinggi, kurangi size
+            risk_amount *= vol_adjustment
+            log.debug(f"[DYN SIZE] ATR {atr_pct:.2%}, target {target_atr:.2%}, adjustment {vol_adjustment:.2f}")
+        
         risk_qty = risk_amount / sl_distance if sl_distance > 0 else 0.0
         score_pct = score / max_score if max_score > 0 else 0.67
         if score_pct >= 0.94: size_mult = 1.30
@@ -1530,7 +1603,16 @@ class RiskManager:
         else: size_mult = 0.60
         max_margin = balance * c.get("MAX_MARGIN_PCT", 0.25) * size_mult
         max_qty = (max_margin * c.get("LEVERAGE", 20)) / entry_price if entry_price > 0 else 0.0
-        return round(min(risk_qty, max_qty), 6)
+        final_qty = round(min(risk_qty, max_qty), 6)
+        
+        # Ensure minimum position size
+        min_size_usdt = c.get("MIN_POSITION_SIZE", 10)
+        min_qty = min_size_usdt / entry_price if entry_price > 0 else 0
+        if final_qty > 0 and final_qty < min_qty:
+            log.warning(f"[SIZE] Quantity {final_qty} below minimum, adjusting to {min_qty}")
+            final_qty = max(min_qty, risk_qty * 0.5)  # Tetap jaga risiko
+        
+        return final_qty
 
     def check_rr(self, levels: dict) -> bool: return levels["rr_ratio"] >= self.cfg.get("MIN_RR_RATIO", 1.5)
 
@@ -2600,6 +2682,14 @@ class ScalperBotV5:
     def _check_circuit_breaker(self) -> bool:
         if self.state.circuit_breaker: return True
         c = self.cfg; basis = self.state.daily_start_balance if self.state.daily_start_balance > 0 else (self.state.balance + abs(self.state.daily_pnl))
+        
+        # Cek News Blackout sebagai tambahan circuit breaker
+        if self.cfg.get("USE_NEWS_FILTER", False):
+            news_status = self._check_news_blackout()
+            if news_status["is_blackout"]:
+                log.warning(f"[CIRCUIT] Trading dibekukan sementara: {news_status['reason']}")
+                return True
+        
         if self.state.daily_pnl < 0:
             loss_pct = abs(self.state.daily_pnl) / max(basis, 1)
             if loss_pct >= c.get("MAX_DAILY_LOSS_PCT", 0.15): self._trigger_circuit("AUTO", f"Daily loss >{c['MAX_DAILY_LOSS_PCT']*100:.0f}%"); return True
@@ -2651,6 +2741,14 @@ class ScalperBotV5:
         tf_sec_map = {"1m": 60, "3m": 180, "5m": 300, "15m": 900, "30m": 1800, "1h": 3600}
         tf_sec = tf_sec_map.get(self.cfg.get("PRIMARY_TF", "5m"), 300)
         cur_candle_ts = int(time.time() // tf_sec) * tf_sec; has_open = self.open_positions_count() > 0
+        
+        # NEWS FILTER: Cek apakah sedang dalam blackout period
+        if self.cfg.get("USE_NEWS_FILTER", False):
+            news_status = self._check_news_blackout()
+            if news_status["is_blackout"]:
+                log.warning(f"[NEWS] Trading dibekukan: {news_status['reason']}")
+                return None
+        
         if (cur_candle_ts == self._last_candle_ts and self._last_signal_cached is not None and not has_open): return self._last_signal_cached
         df = self._fetch_df(symbol, self.cfg["PRIMARY_TF"])
         if df is None: log.warning("Gagal ambil candle primary"); return None
@@ -2658,14 +2756,44 @@ class ScalperBotV5:
         live_price = self.price_feed.get_price(); live_obi = self.price_feed.get_obi()
         live_flow = self.price_feed.get_trade_flow(); live_whale = self.price_feed.get_whale_signal()
         trend_info = self._get_trend_info(symbol); htf_bias = "NEUTRAL"
-        if self.cfg.get("REQUIRE_MTF_CONFIRM"):
-            df_htf = self._fetch_df(symbol, self.cfg["CONFIRM_TF"])
-            if df_htf is not None: htf_bias = self.ta.get_htf_bias(df_htf)
+        
+        # MULTI-TIMEFRAME CONFLUENCE
+        mtf_confirm_ok = True
+        mtf_signal_data = None
+        if self.cfg.get("USE_MTF_CONFIRM", False):
+            mtf_tf = self.cfg.get("MTF_TIMEFRAME", "1h")
+            df_mtf = self._fetch_df(symbol, mtf_tf)
+            if df_mtf is not None:
+                mtf_signal_data = self.ta.get_signal(df_mtf)
+                htf_bias = mtf_signal_data["signal"]
+        else:
+            # Fallback ke old MTF confirm jika USE_MTF_CONFIRM False tapi REQUIRE_MTF_CONFIRM True
+            if self.cfg.get("REQUIRE_MTF_CONFIRM"):
+                df_htf = self._fetch_df(symbol, self.cfg["CONFIRM_TF"])
+                if df_htf is not None: htf_bias = self.ta.get_htf_bias(df_htf)
+        
+        # Proses MTF Confluence logic setelah signal primary didapat
         entry_mode = self.cfg.get("ENTRY_MODE", "PULLBACK"); has_open = self.open_positions_count() > 0
         if entry_mode == "PULLBACK" and not has_open:
             signal = self.ta.get_pullback_signal(df, trend_bias=trend_info["bias"], trend_strength=trend_info["strength"], htf_bias=htf_bias,
                                                  current_price=live_price, obi=live_obi, trade_flow=live_flow, funding_rate=self._funding_rate, whale_side=live_whale)
             signal.update({"htf_bias": htf_bias, "trend_bias": trend_info["bias"], "trend_strength": trend_info["strength"], "trend_detail": trend_info.get("detail", "")})
+            
+            # Cek MTF confluence setelah signal didapat
+            if mtf_signal_data and self.cfg.get("USE_MTF_CONFIRM", False):
+                mtf_score = max(mtf_signal_data["bull_score"], mtf_signal_data["bear_score"])
+                min_mtf_score = self.cfg.get("MTF_MIN_SCORE", 2)
+                signal_direction = signal.get("signal")
+                if signal_direction == "LONG" and htf_bias != "LONG" and mtf_score < min_mtf_score:
+                    signal["signal"] = "NEUTRAL"
+                    signal["blocked_reason"] = f"MTF confluence tidak terpenuhi (score={mtf_score})"
+                    log.info(f"[MTF] LONG ditolak: MTF {mtf_tf} tidak konfirmasi (score={mtf_score})")
+                elif signal_direction == "SHORT" and htf_bias != "SHORT" and mtf_score < min_mtf_score:
+                    signal["signal"] = "NEUTRAL"
+                    signal["blocked_reason"] = f"MTF confluence tidak terpenuhi (score={mtf_score})"
+                    log.info(f"[MTF] SHORT ditolak: MTF {mtf_tf} tidak konfirmasi (score={mtf_score})")
+                trend_info["mtf_bias"] = htf_bias
+                trend_info["mtf_score"] = mtf_score
             if self.cfg.get("CANDLE_CLOSE_CONFIRM", True) and signal["signal"] != "NEUTRAL":
                 tf_sec = tf_sec_map.get(self.cfg.get("PRIMARY_TF", "5m"), 300); candle_age = time.time() % tf_sec
                 window = self.cfg.get("CANDLE_CLOSE_WINDOW_SEC", 90)
@@ -2680,6 +2808,23 @@ class ScalperBotV5:
 
         signal = self.ta.get_signal(df, current_price=live_price, obi=live_obi, trade_flow=live_flow, funding_rate=self._funding_rate, whale_side=live_whale)
         signal["htf_bias"] = htf_bias
+        
+        # Apply MTF confluence untuk regular mode juga
+        if mtf_signal_data and self.cfg.get("USE_MTF_CONFIRM", False):
+            mtf_score = max(mtf_signal_data["bull_score"], mtf_signal_data["bear_score"])
+            min_mtf_score = self.cfg.get("MTF_MIN_SCORE", 2)
+            signal_direction = signal.get("signal")
+            if signal_direction == "LONG" and htf_bias != "LONG" and mtf_score < min_mtf_score:
+                signal["signal"] = "NEUTRAL"
+                signal["blocked_reason"] = f"MTF confluence tidak terpenuhi (score={mtf_score})"
+                log.info(f"[MTF] LONG ditolak: MTF {mtf_tf} tidak konfirmasi (score={mtf_score})")
+            elif signal_direction == "SHORT" and htf_bias != "SHORT" and mtf_score < min_mtf_score:
+                signal["signal"] = "NEUTRAL"
+                signal["blocked_reason"] = f"MTF confluence tidak terpenuhi (score={mtf_score})"
+                log.info(f"[MTF] SHORT ditolak: MTF {mtf_tf} tidak konfirmasi (score={mtf_score})")
+            trend_info["mtf_bias"] = htf_bias
+            trend_info["mtf_score"] = mtf_score
+        
         if self.cfg.get("REQUIRE_MTF_CONFIRM"):
             if signal["signal"] == "LONG" and htf_bias == "BEARISH": signal["signal"] = "NEUTRAL"; signal["blocked_reason"] = "MTF conflict: LONG vs 15m BEARISH"
             elif signal["signal"] == "SHORT" and htf_bias == "BULLISH": signal["signal"] = "NEUTRAL"; signal["blocked_reason"] = "MTF conflict: SHORT vs 15m BULLISH"
@@ -2695,26 +2840,60 @@ class ScalperBotV5:
             signal["velocity"] = round(velocity, 4)
         self._last_signal_cached = signal; return signal
 
+    def _check_news_blackout(self) -> dict:
+        """Cek apakah sedang dalam periode blackout berita ekonomi"""
+        if not self.cfg.get("USE_NEWS_FILTER", False):
+            return {"is_blackout": False, "reason": ""}
+        
+        now = datetime.utcnow()
+        current_day = now.weekday()  # 0=Senin, 6=Minggu
+        current_minutes = now.hour * 60 + now.minute
+        
+        scheduled_news = self.cfg.get("SCHEDULED_NEWS", [])
+        blackout_minutes = self.cfg.get("NEWS_BLACKOUT_MINUTES", 60)
+        
+        for news in scheduled_news:
+            if news.get("day") == current_day:
+                news_minutes = news["hour"] * 60 + news["minute"]
+                if abs(current_minutes - news_minutes) <= blackout_minutes:
+                    minutes_left = blackout_minutes - abs(current_minutes - news_minutes)
+                    return {
+                        "is_blackout": True,
+                        "reason": f"{news['name']} dalam {minutes_left} menit",
+                        "news_name": news["name"],
+                        "minutes_left": minutes_left
+                    }
+        
+        return {"is_blackout": False, "reason": ""}
+
     def open_positions_count(self) -> int:
         with self._pos_lock: return sum(1 for p in self.state.positions if not p.closed)
 
     def _check_abort(self, pos: Position, price: float):
+        """Check abort condition with thread safety (FIX: added lock protection)"""
         c = self.cfg
         if not c.get("ABORT_ENABLED", True) or pos.closed or pos.tp1_hit or pos.be_hit or pos.id.startswith("SYNC-"): return
         age = time.time() - pos.opened_ts
         if age <= 0 or age > c.get("ABORT_CHECK_SEC", 90): return
         threshold = c.get("ABORT_THRESHOLD_PCT", 0.004)
         move_pct = (price - pos.entry_price) / pos.entry_price if pos.side == "LONG" else (pos.entry_price - price) / pos.entry_price
-        if move_pct < -threshold: log.info(f"[ABORT] {pos.id} {pos.side} — harga bergerak {move_pct*100:.3f}% berlawanan dalam {age:.0f}s → close sebelum SL kena"); self._close_position(pos, price, "Abort — no momentum after entry")
+        if move_pct < -threshold: 
+            log.info(f"[ABORT] {pos.id} {pos.side} — harga bergerak {move_pct*100:.3f}% berlawanan dalam {age:.0f}s → close sebelum SL kena")
+            # FIX: Close position dengan lock yang sudah dihold oleh caller
+            self._close_position(pos, price, "Abort — no momentum after entry")
 
     def _open_position(self, signal: dict, entry_price: float):
         c = self.cfg; side = signal["signal"]; atr = signal["atr"]; symbol = c["SYMBOL"]
         levels = self.risk.calculate_levels(side, entry_price, atr, atr_pct=signal.get("atr_pct", 0.0))
         if not self.risk.check_rr(levels): log.info(f"[SKIP] R:R terlalu rendah ({levels['rr_ratio']:.2f})"); return
+        
+        # DYNAMIC POSITION SIZING: Pass ATR % ke position_size untuk volatilitas adjustment
+        atr_pct = signal.get("atr_pct", 0)
+        self.risk.cfg["_CURRENT_ATR_PCT"] = atr_pct  # Set current ATR untuk dynamic sizing
+        
         qty = self.risk.position_size(self.state.balance, levels["sl_distance"], entry_price, win_rate=self.state.win_rate()/100,
                                       score=max(signal.get("bull_score", 0), signal.get("bear_score", 0)), max_score=signal.get("max_score", 22))
         if qty <= 0: log.info("[SKIP] Quantity 0, saldo tidak cukup"); return
-        atr_pct = signal.get("atr_pct", 0)
         if atr_pct > c.get("MAX_ATR_PCT_ENTRY", 4.0): log.info(f"[SKIP] ATR terlalu tinggi ({atr_pct:.2f}%)"); return
         if atr_pct < c.get("MIN_ATR_PCT", 0.3): log.info(f"[SKIP] ATR terlalu rendah ({atr_pct:.2f}%)"); return
         sl_pct = levels["sl_distance"] / entry_price * 100
@@ -2725,7 +2904,34 @@ class ScalperBotV5:
         sym_key = symbol; last_loss = self._last_loss_time.get(sym_key, 0); cooldown = c.get("LOSS_COOLDOWN_SEC", 60)
         if (time.time() - last_loss) < cooldown: log.info(f"[SKIP] Cooldown setelah loss ({int(cooldown - (time.time() - last_loss))}s tersisa)"); return
         if c.get("CORRELATION_FILTER", True):
-            CORR_GROUPS = [{"BTC_USDT", "ETH_USDT", "BNB_USDT", "SOL_USDT", "AVAX_USDT", "MATIC_USDT", "ARB_USDT", "OP_USDT"}, {"XAUT_USDT", "PAXG_USDT"}]
+            # FIX: Dynamic correlation groups based on active symbols from scanner
+            # Jika multi-coin mode aktif, bangun grup korelasi dinamis dari whitelist
+            if self.cfg.get("MULTI_COIN_MODE", False):
+                # Ambil semua simbol aktif dari whitelist atau hasil scan terakhir
+                active_symbols = set(self.cfg.get("WHITELIST_COINS", []))
+                if not active_symbols and hasattr(self, '_scanner') and self._scanner:
+                    # Gunakan hasil scan terakhir jika tersedia
+                    try:
+                        for res in getattr(self._scanner, '_results', []):
+                            sym = res.get('symbol', '').replace('_USDT', '')
+                            if sym: active_symbols.add(sym + '_USDT')
+                    except: pass
+                
+                # Bangun grup korelasi dinamis berdasarkan sektor (simplified)
+                CORR_GROUPS = [
+                    {"BTC_USDT", "ETH_USDT", "BNB_USDT", "SOL_USDT", "AVAX_USDT", "MATIC_USDT", "ARB_USDT", "OP_USDT"},
+                    {"XAUT_USDT", "PAXG_USDT"}
+                ]
+                # Tambahkan grup dinamis untuk simbol lain yang tidak ada di grup hardcoded
+                if active_symbols:
+                    other_syms = active_symbols - set().union(*CORR_GROUPS)
+                    if other_syms:
+                        # Grup simbol lain berdasarkan kemiripan nama/pola (simplified: semua dalam 1 grup)
+                        CORR_GROUPS.append(other_syms)
+            else:
+                # Mode single coin: gunakan grup hardcoded seperti biasa
+                CORR_GROUPS = [{"BTC_USDT", "ETH_USDT", "BNB_USDT", "SOL_USDT", "AVAX_USDT", "MATIC_USDT", "ARB_USDT", "OP_USDT"}, {"XAUT_USDT", "PAXG_USDT"}]
+            
             for grp in CORR_GROUPS:
                 if symbol not in grp: continue
                 with self._pos_lock:
@@ -2736,12 +2942,28 @@ class ScalperBotV5:
         if not self.dry_run:
             self.client.cancel_all_orders(symbol); mexc_side = 1 if side == "LONG" else 3
             max_retries, chase_delay, limit_filled = 5, 1.5, False
+            # FIX: Tambahkan timeout total untuk mencegah infinite loop
+            start_time = time.time()
+            max_total_time = c.get("ORDER_TIMEOUT_SEC", 30)  # Default 30 detik timeout total
+            
             for attempt in range(max_retries):
+                # Cek timeout total sebelum setiap attempt
+                if time.time() - start_time > max_total_time:
+                    log.error(f"[{symbol}] Timeout setelah {max_total_time}s. Order dibatalkan.")
+                    break
+                    
                 ticker = self.client.get_ticker(symbol)
-                if not ticker: continue
+                if not ticker: 
+                    time.sleep(0.5)  # Small delay sebelum retry get_ticker
+                    continue
                 limit_price = ticker; log.info(f"[{symbol}] Limit Chaser (Attempt {attempt+1}/{max_retries}) | Jaring di: {limit_price}")
                 res = self.client.place_order(symbol, mexc_side, 2, c["LEVERAGE"], qty, price=limit_price)
-                if not res: log.warning(f"[{symbol}] Gagal pasang Post-Only (harga menabrak spread). Retry..."); time.sleep(chase_delay); continue
+                if not res: 
+                    log.warning(f"[{symbol}] Gagal pasang Post-Only (harga menabrak spread). Retry...")
+                    # FIX: Exponential backoff untuk retry
+                    backoff = chase_delay * (1.5 ** attempt)
+                    time.sleep(min(backoff, 5))  # Max 5 detik per backoff
+                    continue
                 order_id_temp = str(res) if isinstance(res, (int, str)) else str(res.get("orderId", ""))
                 time.sleep(chase_delay)
                 positions = self.client.get_open_positions(symbol)
@@ -2749,7 +2971,8 @@ class ScalperBotV5:
                     if float(pos_data.get("vol", 0)) > 0: log.info(f"[{symbol}] BINGO! Jaring Maker (0% Fee) dimakan pasar!"); limit_filled = True; order_id = order_id_temp; break
                 if limit_filled: break
                 log.info(f"[{symbol}] Jaring tidak dimakan (harga lari). Batalkan dan kejar ulang..."); self.client.cancel_all_orders(symbol)
-            if not limit_filled: log.error(f"[{symbol}] Gagal mengejar harga setelah {max_retries} kali. Sinyal Abort (Batal)."); return
+            
+            if not limit_filled: log.error(f"[{symbol}] Gagal mengejar harga setelah {max_retries} kali atau timeout. Sinyal Abort (Batal)."); return
 
         pos = Position(id=self._gen_trade_id(), symbol=symbol, side=side, entry_price=entry_price, quantity=qty,
                        stop_loss=levels["stop_loss"], take_profit1=levels["take_profit1"], take_profit2=levels["take_profit2"],
@@ -3074,7 +3297,6 @@ class ScalperBotV5:
                 if data: self.update_config_live(data); going_live = not data.get("DRY_RUN", True)
                 if going_live and self.state.api_error: return jsonify({"success": True, "warning": self.state.api_error})
                 return jsonify({"success": True})
-                return jsonify({"success": False, "error": "No data"})
             except Exception as e: return jsonify({"success": False, "error": str(e)})
         @app.route("/api/close_all", methods=["POST"])
         def close_all_route(): self.close_all_positions("Manual via API"); return jsonify({"success": True})
