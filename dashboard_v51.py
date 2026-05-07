@@ -109,7 +109,13 @@ st.markdown("""
     .m-value { font-size: 1rem; }
     .m-card  { padding: 11px 8px; }
 
-    h1 { font-size: 1.25rem !important; line-height: 1.3 !important; }
+    h1 {
+        font-size: 1.1rem !important;
+        line-height: 1.3 !important;
+        white-space: normal !important;
+        word-break: break-word !important;
+        overflow-wrap: break-word !important;
+    }
     h2, h3 { font-size: 1rem !important; }
 
     /* Tabs scrollable */
@@ -223,7 +229,7 @@ if st.sidebar.button("🔄 Refresh Data"):
     st.rerun()
 
 # ── Main Content ──
-st.title("⚡ MEXC Scalper V5.1 — Live Dashboard")
+st.title("⚡ MEXC Scalper V5.1")
 
 if not is_online:
     st.error("Bot tidak bisa dijangkau di `http://localhost:5003`. Jalankan: `python mexc_scalperV5.1.py --dashboard`")
