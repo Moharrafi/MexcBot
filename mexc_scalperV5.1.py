@@ -163,6 +163,7 @@ CONFIG = {
     "BLOCK_FRIDAY_CLOSE": False,
     "BLOCK_SUNDAY_OPEN": False,
     "NEWS_BLACKOUT": [],
+    "ADAPTIVE_MODE": False,
 }
 
 # ══════════════════════════════════════════════════════════════
@@ -2973,12 +2974,14 @@ class ScalperBotV5:
                     self._funding_last_check = time.time()
                 if self.regime_mgr: self.regime_mgr.apply_regime_to_config()
                 if self._check_circuit_breaker(): log.warning(f"Circuit breaker aktif: {self.state.circuit_reason}"); time.sleep(30); continue
+                if self._is_news_blackout(): time.sleep(60); continue
                 allowed, reason = self.session_filt.is_trading_allowed()
                 if not allowed: log.info(f"Session filter: {reason}"); time.sleep(60); continue
                 if self.cfg.get("MULTI_COIN_MODE") and self.scanner.needs_scan(): self._trigger_scan()
                 if self.cfg.get("AUTO_SWITCH_COIN") and self.open_positions_count() == 0: self._maybe_switch_coin()
                 signal = self.fetch_and_analyze()
                 if signal is None: time.sleep(self.cfg["POLL_INTERVAL"]); continue
+                self._apply_adaptive_regime(signal)
                 price = self.price_feed.get_price() or signal["close"]; sig_label = signal["signal"]
                 bull_score, bear_score = signal["bull_score"], signal["bear_score"]; velocity = signal.get("velocity", 0.0)
                 st_flip, sq_on = signal.get("st_flipped", False), signal.get("squeeze_on", False)
@@ -3045,6 +3048,64 @@ class ScalperBotV5:
             return float(self._ml_model.predict_proba(X)[0][1])
         except Exception as e: log.debug(f"[ML] predict error: {e}"); return 0.5
 
+    def _apply_adaptive_regime(self, signal: dict):
+        """Auto-adjust risk params berdasarkan ATR%/ADX regime."""
+        if not self.cfg.get("ADAPTIVE_MODE", False):
+            return
+        for key, base_key in [
+            ("RISK_PER_TRADE", "_BASE_RISK"),
+            ("ADX_MIN_THRESHOLD", "_BASE_ADX"),
+            ("ATR_SL_MULT", "_BASE_ATR_SL"),
+            ("MIN_BULL_SCORE", "_BASE_MIN_BULL"),
+            ("MIN_BEAR_SCORE", "_BASE_MIN_BEAR"),
+        ]:
+            if base_key not in self.cfg:
+                self.cfg[base_key] = self.cfg[key]
+
+        atr_pct = signal.get("atr_pct", 0.0)
+        high_vol = self.cfg.get("HIGH_VOL_ATR_PCT", 1.5)
+        low_vol = self.cfg.get("LOW_VOL_ATR_PCT", 0.5)
+
+        if atr_pct >= high_vol:
+            regime = "SNIPER"
+            risk_mult, adx_bump, sl_mult, score_bump = 0.5, 5, 1.5, 3
+        elif atr_pct <= low_vol:
+            regime = "AGGRESSIVE"
+            risk_mult, adx_bump, sl_mult, score_bump = 1.3, -5, 0.8, -2
+        else:
+            regime = "ACTIVE"
+            risk_mult, adx_bump, sl_mult, score_bump = 1.0, 0, 1.0, 0
+
+        prev = getattr(self, "_current_regime", None)
+        if regime != prev:
+            log.info(f"[ADAPTIVE] {prev} → {regime} | ATR%={atr_pct:.2f} (high≥{high_vol} low≤{low_vol})")
+            self._current_regime = regime
+
+        self.cfg["RISK_PER_TRADE"] = round(self.cfg["_BASE_RISK"] * risk_mult, 4)
+        self.cfg["ADX_MIN_THRESHOLD"] = max(15, self.cfg["_BASE_ADX"] + adx_bump)
+        self.cfg["ATR_SL_MULT"] = sl_mult
+        self.cfg["MIN_BULL_SCORE"] = max(10, self.cfg["_BASE_MIN_BULL"] + score_bump)
+        self.cfg["MIN_BEAR_SCORE"] = max(10, self.cfg["_BASE_MIN_BEAR"] + score_bump)
+
+    def _is_news_blackout(self) -> bool:
+        """Cek apakah sekarang dalam periode blackout berita terjadwal."""
+        events = self.cfg.get("NEWS_BLACKOUT", [])
+        if not events:
+            return False
+        now = datetime.now(timezone.utc)
+        for ev in events:
+            try:
+                h, m = map(int, ev["time"].split(":"))
+                margin = timedelta(minutes=int(ev.get("margin_min", 60)))
+                event_dt = now.replace(hour=h, minute=m, second=0, microsecond=0)
+                for candidate in [event_dt, event_dt - timedelta(days=1)]:
+                    if abs(now - candidate) <= margin:
+                        log.warning(f"[NEWS] Blackout: {ev.get('event','?')} @ {ev['time']} UTC ±{ev.get('margin_min',60)}m")
+                        return True
+            except Exception:
+                continue
+        return False
+
     def _start_dashboard(self):
         try: from flask import Flask, jsonify, request, Response
         except ImportError: log.warning("Flask tidak terinstall. Install: pip install flask"); return
@@ -3064,7 +3125,9 @@ class ScalperBotV5:
                             "win_rate": round(self.state.win_rate(), 1), "total_trades": self.state.total_trades, "winning_trades": self.state.winning_trades,
                             "drawdown": round(self.state.drawdown(), 2), "circuit_breaker": self.state.circuit_breaker, "circuit_reason": self.state.circuit_reason,
                             "circuit_type": self.state.circuit_type, "positions": positions_data, "dry_run": self.dry_run, "secured_total": round(self.state.secured_total, 2),
-                            "api_error": self.state.api_error, "iteration": self.state.iteration, "last_signal": self.state.last_signal, "ws_alive": self.price_feed.is_ws_alive})
+                            "api_error": self.state.api_error, "iteration": self.state.iteration, "last_signal": self.state.last_signal, "ws_alive": self.price_feed.is_ws_alive,
+                            "adaptive_regime": getattr(self, "_current_regime", "ACTIVE"), "adaptive_mode": self.cfg.get("ADAPTIVE_MODE", False),
+                            "news_blackout": self._is_news_blackout()})
         @app.route("/api/config", methods=["GET"])
         def get_config(): safe = dict(self.cfg); safe["MEXC_API_SECRET"] = "***"; return jsonify(safe)
         @app.route("/api/config", methods=["POST"])

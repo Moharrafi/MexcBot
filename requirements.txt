@@ -13,5 +13,10 @@ websocket-client>=1.7.0
 # Web dashboard (opsional)
 flask>=3.0.0
 
+# Streamlit dashboard (dashboard_v51.py)
+streamlit>=1.32.0
+plotly>=5.20.0
+numpy>=1.24.0
+
 # Logging & utils (sudah built-in Python, listed for clarity)
 # hmac, hashlib, threading, json, csv — stdlib
