@@ -277,6 +277,10 @@ class BotState:
     active_symbol: str = ""
     api_error: str = ""
     real_balance: float = 0.0
+    
+    # Adaptive Mode State
+    current_adaptive_mode: str = "AUTO"
+    last_adaptive_mode: str = "AUTO"
 
     def win_rate(self) -> float:
         return (self.winning_trades / self.total_trades * 100) if self.total_trades > 0 else 0.0
@@ -2697,6 +2701,127 @@ class ScalperBotV5:
         if dd >= c.get("MAX_DRAWDOWN_PCT", 0.30) * 100: self._trigger_circuit("AUTO", f"Max drawdown {dd:.1f}%"); return True
         return False
 
+    def _apply_adaptive_regime(self, current_df: Optional[pd.DataFrame]) -> str:
+        """
+        Menentukan dan menerapkan mode trading secara otomatis berdasarkan kondisi pasar.
+        Dipanggil setiap siklus untuk menyesuaikan parameter secara dinamis.
+        Returns: Mode trading yang aktif saat ini.
+        """
+        c = self.cfg
+        current_mode = c.get("TRADING_MODE", "AUTO")
+        
+        # Jika mode manual (bukan AUTO), jangan ubah parameter otomatis
+        if current_mode != "AUTO":
+            return current_mode
+            
+        # Hitung ATR % dari dataframe saat ini
+        atr_pct = 0.0
+        if current_df is not None and len(current_df) > 0 and "atr_pct" in current_df.columns:
+            atr_pct = float(current_df["atr_pct"].iloc[-1])
+        
+        # Cek status Circuit Breaker & News
+        is_circuit_active = self.state.circuit_breaker
+        is_news_blackout = False
+        if c.get("USE_NEWS_FILTER", False):
+            news_status = self._check_news_blackout()
+            is_news_blackout = news_status.get("is_blackout", False)
+        
+        # Tentukan mode berdasarkan kondisi
+        new_mode = "ACTIVE"  # Default
+        
+        if is_news_blackout:
+            new_mode = "NEWS_BLACKOUT"
+        elif is_circuit_active:
+            new_mode = "DEFENSIVE"
+        elif atr_pct > 1.5:  # Volatilitas Sangat Tinggi
+            new_mode = "SNIPER"
+        elif atr_pct < 0.5:  # Volatilitas Sangat Rendah (Pasar Sepi/Datar)
+            new_mode = "AGGRESSIVE"
+        else:
+            new_mode = "ACTIVE"  # Kondisi Normal
+            
+        # Simpan mode saat ini ke state untuk dashboard
+        self.state.current_adaptive_mode = new_mode
+        
+        # Terapkan parameter sesuai mode (Hanya jika mode AUTO)
+        self._apply_mode_settings(new_mode)
+        
+        if new_mode != self.state.last_adaptive_mode:
+            log.info(f"[ADAPTIVE] Mode berubah: {self.state.last_adaptive_mode} → {new_mode} (ATR: {atr_pct:.2f}%)")
+            self.state.last_adaptive_mode = new_mode
+            
+        return new_mode
+
+    def _apply_mode_settings(self, mode: str):
+        """Menerapkan preset parameter konfigurasi berdasarkan mode trading."""
+        c = self.cfg
+        
+        # Preset Parameter per Mode
+        presets = {
+            "SNIPER": {
+                "ADX_THRESHOLD": 30,          # Butuh tren kuat
+                "STOP_LOSS_PCT": 0.015,       # SL Ketat (1.5%)
+                "TAKE_PROFIT_PCT": 0.03,      # TP Cepat (3%)
+                "MIN_SCORE": 8,               # Skor entry tinggi
+                "TRAILING_STOP_ACTIVE": True, # Aktifkan trailing
+                "USE_MTF_CONFIRM": True,      # Wajib konfirmasi MTF
+                "POSITION_SIZE_PCT": 0.05     # Size lebih kecil (5%)
+            },
+            "ACTIVE": {
+                "ADX_THRESHOLD": 20,          # Normal
+                "STOP_LOSS_PCT": 0.02,        # SL Standar (2%)
+                "TAKE_PROFIT_PCT": 0.04,      # TP Standar (4%)
+                "MIN_SCORE": 6,               # Skor normal
+                "TRAILING_STOP_ACTIVE": True,
+                "USE_MTF_CONFIRM": True,
+                "POSITION_SIZE_PCT": 0.10     # Size standar (10%)
+            },
+            "AGGRESSIVE": {
+                "ADX_THRESHOLD": 15,          # Bisa entry di sideways
+                "STOP_LOSS_PCT": 0.025,       # SL Longgar (2.5%) agar tidak kena noise
+                "TAKE_PROFIT_PCT": 0.03,      # TP Cepat ambil profit kecil
+                "MIN_SCORE": 4,               # Skor rendah agar sering entry
+                "TRAILING_STOP_ACTIVE": False,# Matikan trailing (potensi whipsaw)
+                "USE_MTF_CONFIRM": False,     # Tidak wajib MTF
+                "POSITION_SIZE_PCT": 0.15     # Size lebih besar (15%)
+            },
+            "DEFENSIVE": {
+                "ADX_THRESHOLD": 35,          # Sangat selektif
+                "STOP_LOSS_PCT": 0.01,        # SL Sangat Ketat
+                "TAKE_PROFIT_PCT": 0.02,      # TP Kecil cepat keluar
+                "MIN_SCORE": 9,               # Hanya entry sangat bagus
+                "TRAILING_STOP_ACTIVE": True,
+                "USE_MTF_CONFIRM": True,
+                "POSITION_SIZE_PCT": 0.02     # Size sangat kecil (2%)
+            },
+            "NEWS_BLACKOUT": {
+                "ADX_THRESHOLD": 50,          # Hampir tidak mungkin entry
+                "STOP_LOSS_PCT": 0.01,
+                "TAKE_PROFIT_PCT": 0.02,
+                "MIN_SCORE": 10,              # Blokir semua entry praktis
+                "TRAILING_STOP_ACTIVE": True,
+                "USE_MTF_CONFIRM": True,
+                "POSITION_SIZE_PCT": 0.00     # Ukuran 0 = Stop Trading
+            }
+        }
+        
+        # Ambil preset untuk mode saat ini
+        settings = presets.get(mode, presets["ACTIVE"])
+        
+        # Update konfigurasi global dengan preset
+        for key, value in settings.items():
+            c[key] = value
+            
+        # Log perubahan penting
+        if mode == "SNIPER":
+            log.debug(f"[MODE {mode}] SL diperketat, ADX dinaikkan.")
+        elif mode == "AGGRESSIVE":
+            log.debug(f"[MODE {mode}] Filter dilonggarkan, size dinaikkan.")
+        elif mode == "DEFENSIVE":
+            log.debug(f"[MODE {mode}] Mode proteksi modal aktif.")
+        elif mode == "NEWS_BLACKOUT":
+            log.warning(f"[MODE {mode}] TRADING DIHENTIKAN sementara akibat berita.")
+
     def _trigger_circuit(self, ctype: str, reason: str):
         self.state.circuit_breaker = True; self.state.circuit_triggered_at = time.time()
         self.state.circuit_type = ctype; self.state.circuit_reason = reason
@@ -2753,6 +2878,10 @@ class ScalperBotV5:
         df = self._fetch_df(symbol, self.cfg["PRIMARY_TF"])
         if df is None: log.warning("Gagal ambil candle primary"); return None
         self._last_candle_ts = cur_candle_ts
+        
+        # ADAPTIVE REGIME: Terapkan mode otomatis berdasarkan kondisi pasar
+        current_mode = self._apply_adaptive_regime(df)
+        
         live_price = self.price_feed.get_price(); live_obi = self.price_feed.get_obi()
         live_flow = self.price_feed.get_trade_flow(); live_whale = self.price_feed.get_whale_signal()
         trend_info = self._get_trend_info(symbol); htf_bias = "NEUTRAL"
@@ -3282,12 +3411,41 @@ class ScalperBotV5:
                 for pos in list(self.state.positions):
                     if not pos.closed: pnl_live = (price - pos.entry_price) * pos.quantity if pos.side == "LONG" else (pos.entry_price - price) * pos.quantity
                     positions_data.append({**asdict(pos), "pnl_live": round(pnl_live, 4), "current_price": price})
-            return jsonify({"symbol": self.cfg["SYMBOL"], "price": price, "balance": round(self.state.balance, 2), "real_balance": round(self.state.real_balance, 2),
-                            "peak_balance": round(self.state.peak_balance, 2), "total_pnl": round(self.state.total_pnl, 4), "daily_pnl": round(self.state.daily_pnl, 4),
-                            "win_rate": round(self.state.win_rate(), 1), "total_trades": self.state.total_trades, "winning_trades": self.state.winning_trades,
-                            "drawdown": round(self.state.drawdown(), 2), "circuit_breaker": self.state.circuit_breaker, "circuit_reason": self.state.circuit_reason,
-                            "circuit_type": self.state.circuit_type, "positions": positions_data, "dry_run": self.dry_run, "secured_total": round(self.state.secured_total, 2),
-                            "api_error": self.state.api_error, "iteration": self.state.iteration, "last_signal": self.state.last_signal, "ws_alive": self.price_feed.is_ws_alive})
+            
+            # Dapatkan mode trading saat ini (adaptive atau manual)
+            current_mode = self.cfg.get("TRADING_MODE", "AUTO")
+            adaptive_mode = getattr(self.state, "current_adaptive_mode", "AUTO")
+            
+            # Jika mode AUTO, tampilkan adaptive_mode, jika tidak tampilkan mode manual
+            display_mode = adaptive_mode if current_mode == "AUTO" else current_mode
+            
+            return jsonify({
+                "symbol": self.cfg["SYMBOL"], 
+                "price": price, 
+                "balance": round(self.state.balance, 2), 
+                "real_balance": round(self.state.real_balance, 2),
+                "peak_balance": round(self.state.peak_balance, 2), 
+                "total_pnl": round(self.state.total_pnl, 4), 
+                "daily_pnl": round(self.state.daily_pnl, 4),
+                "win_rate": round(self.state.win_rate(), 1), 
+                "total_trades": self.state.total_trades, 
+                "winning_trades": self.state.winning_trades,
+                "drawdown": round(self.state.drawdown(), 2), 
+                "circuit_breaker": self.state.circuit_breaker, 
+                "circuit_reason": self.state.circuit_reason,
+                "circuit_type": self.state.circuit_type, 
+                "positions": positions_data, 
+                "dry_run": self.dry_run, 
+                "secured_total": round(self.state.secured_total, 2),
+                "api_error": self.state.api_error, 
+                "iteration": self.state.iteration, 
+                "last_signal": self.state.last_signal, 
+                "ws_alive": self.price_feed.is_ws_alive,
+                # Tambahkan informasi adaptive mode
+                "mode": display_mode,
+                "adaptive_mode": adaptive_mode,
+                "manual_override": current_mode != "AUTO"
+            })
         @app.route("/api/config", methods=["GET"])
         def get_config(): safe = dict(self.cfg); safe["MEXC_API_SECRET"] = "***"; return jsonify(safe)
         @app.route("/api/config", methods=["POST"])

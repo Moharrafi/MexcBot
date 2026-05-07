@@ -132,9 +132,11 @@ if st.button("🔄 Refresh Data"):
 col1, col2, col3, col4 = st.columns(4)
 
 with col1:
+    # Tampilkan Adaptive Mode jika tersedia
+    adaptive_mode = bot_status.get("adaptive_mode", bot_status.get("mode", "N/A"))
     st.metric(
         label="Trading Mode",
-        value=bot_status.get("mode", "N/A"),
+        value=adaptive_mode,
         delta="Auto" if not bot_status.get("manual_override", True) else "Manual"
     )
 
@@ -196,7 +198,7 @@ with chart_col1:
 with chart_col2:
     st.subheader("🎭 Market Regime")
     
-    # Gauge Chart untuk Market Regime
+    # Gauge Chart untuk Market Regime berdasarkan Adaptive Mode
     regime_map = {
         "SNIPER": {"value": 80, "color": "#00CC96", "label": "High Vol"},
         "ACTIVE": {"value": 50, "color": "#636EFA", "label": "Normal"},
