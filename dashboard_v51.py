@@ -93,7 +93,7 @@ st.markdown("""
     .block-container {
         padding-left: .75rem !important;
         padding-right: .75rem !important;
-        padding-top: .5rem !important;
+        padding-top: 3.5rem !important;
         max-width: 100% !important;
     }
 
