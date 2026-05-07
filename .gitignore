@@ -1,55 +1,24 @@
-# Environment / secrets
-.env
-.env.*
-
-# Sensitive config (contains API keys)
-config.json
-config_bot2.json
-config_scalper_v4.json
-config_v3.json
-config_v3_temp.json
-
-# Runtime state files
-bot_state.json
-bot_state_v3.json
-scalper_state_v4.json
-scanned_signals.json
-
-# Log files
-*.log
-scalper_journal_v4.csv
-scalper_journal_v4_dry.csv
-trade_journal.csv
-trade_journal_v3.csv
-trade_journal_vps.csv
-
-# Output / debug files
-bal_out.txt
-test_api_out.txt
-
-# Virtual environment
-.venv/
-venv/
-env/
-
-# Claude Code local config
-.claude/
-
-# Python cache
+```
+# Python
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
 
-# ML model files (large binary)
-*.pkl
-*.joblib
-*.h5
-*.model
+# Logs and temp files
+*.log
+*.tmp
 
-# Scratch / temp
-scratch/
+# Environment
+.env
+.env.local
+*.env.*
 
-# OS files
-.DS_Store
-Thumbs.db
+# Editors
+.vscode/
+.idea/
+
+# Dependencies
+.venv/
+venv/
+```
