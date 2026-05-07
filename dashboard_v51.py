@@ -20,14 +20,127 @@ st.set_page_config(
 
 st.markdown("""
 <style>
-    .circuit-banner {
-        background: #5c0000; border: 2px solid #ff4444;
-        border-radius: 8px; padding: 16px; margin: 10px 0;
+/* ── Banners ── */
+.circuit-banner {
+    background: #5c0000; border: 2px solid #ff4444;
+    border-radius: 8px; padding: 14px; margin: 8px 0;
+}
+.news-banner {
+    background: #3a2a00; border: 2px solid #ffaa00;
+    border-radius: 8px; padding: 10px; margin: 6px 0;
+}
+
+/* ── Mobile status bar (hidden on desktop) ── */
+.status-bar {
+    display: none;
+    background: #1a1a2e;
+    border: 1px solid #2d2d4e;
+    border-radius: 10px;
+    padding: 10px 14px;
+    margin: 0 0 12px 0;
+    gap: 8px;
+    align-items: center;
+    flex-wrap: wrap;
+}
+.sb-symbol { font-weight: 700; font-size: 1rem; color: #fff; }
+.sb-price  { color: #aaa; font-size: 0.88rem; }
+.sb-badge  { padding: 2px 8px; border-radius: 4px; font-size: 0.72rem; font-weight: 700; }
+.sb-long   { background: rgba(0,204,150,.2);  color: #00CC96; }
+.sb-short  { background: rgba(239,85,59,.2);  color: #EF553B; }
+.sb-neut   { background: rgba(255,255,255,.08); color: #aaa; }
+.sb-sniper     { background: rgba(0,204,150,.2);  color: #00CC96; }
+.sb-active     { background: rgba(99,110,250,.2); color: #636EFA; }
+.sb-aggressive { background: rgba(239,85,59,.2);  color: #EF553B; }
+.sb-iter   { color: #666; font-size: 0.72rem; margin-left: auto; }
+
+/* ── Metric cards grid ── */
+.metrics-row {
+    display: grid;
+    grid-template-columns: repeat(6, 1fr);
+    gap: 8px;
+    margin: 4px 0 14px 0;
+}
+.m-card {
+    background: #1a1a2e;
+    border: 1px solid #2d2d4e;
+    border-radius: 10px;
+    padding: 14px 8px;
+    text-align: center;
+}
+.m-label {
+    font-size: 0.67rem;
+    color: #888;
+    text-transform: uppercase;
+    letter-spacing: .05em;
+    margin-bottom: 5px;
+}
+.m-value {
+    font-size: 1.15rem;
+    font-weight: 700;
+    color: #fff;
+    line-height: 1.2;
+}
+.m-sub {
+    font-size: 0.67rem;
+    color: #666;
+    margin-top: 3px;
+}
+
+/* ── Mobile ── */
+@media (max-width: 768px) {
+    .status-bar { display: flex; }
+
+    .block-container {
+        padding-left: .75rem !important;
+        padding-right: .75rem !important;
+        padding-top: .5rem !important;
+        max-width: 100% !important;
     }
-    .news-banner {
-        background: #3a2a00; border: 2px solid #ffaa00;
-        border-radius: 8px; padding: 12px; margin: 8px 0;
+
+    /* Stack all Streamlit columns */
+    [data-testid="column"] {
+        width: 100% !important;
+        flex: 1 1 100% !important;
+        min-width: 100% !important;
     }
+
+    /* Metrics 2-per-row */
+    .metrics-row { grid-template-columns: repeat(2, 1fr); gap: 6px; }
+    .m-value { font-size: 1rem; }
+    .m-card  { padding: 11px 8px; }
+
+    h1 { font-size: 1.25rem !important; line-height: 1.3 !important; }
+    h2, h3 { font-size: 1rem !important; }
+
+    /* Tabs scrollable */
+    [data-testid="stTabs"] > div:first-child {
+        overflow-x: auto !important;
+        -webkit-overflow-scrolling: touch;
+        scrollbar-width: none;
+    }
+    [data-testid="stTabs"] > div:first-child::-webkit-scrollbar { display: none; }
+    button[data-baseweb="tab"] {
+        font-size: 0.72rem !important;
+        padding: 6px 8px !important;
+        white-space: nowrap !important;
+    }
+
+    /* Touch-friendly controls */
+    [data-testid="stButton"] > button { min-height: 44px !important; }
+    [data-testid="stSlider"] { padding: 8px 0 !important; }
+
+    /* Scrollable tables */
+    [data-testid="stDataFrame"] { overflow-x: auto !important; }
+    .stDataFrame > div { overflow-x: auto !important; -webkit-overflow-scrolling: touch; }
+
+    /* Reduce divider spacing */
+    hr { margin: .5rem 0 !important; }
+}
+
+@media (max-width: 400px) {
+    .m-value { font-size: .88rem; }
+    .metrics-row { gap: 4px; }
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -137,26 +250,69 @@ def live_panel():
             unsafe_allow_html=True
         )
 
+    # ── Mobile status bar ──
+    sig     = s.get("last_signal", "NEUTRAL")
+    regime  = s.get("adaptive_regime", "ACTIVE")
+    sig_cls = "sb-long" if sig == "LONG" else "sb-short" if sig == "SHORT" else "sb-neut"
+    reg_cls = f"sb-{regime.lower()}"
+    ws_dot  = "🟢" if s.get("ws_alive") else "🔴"
+    dry_badge = "🟡 DRY" if s.get("dry_run") else "🔴 LIVE"
+    st.markdown(f"""
+    <div class="status-bar">
+        <span class="sb-symbol">{s.get('symbol','?')}</span>
+        <span class="sb-price">${float(s.get('price',0)):.4f}</span>
+        <span class="sb-badge {sig_cls}">{sig}</span>
+        <span class="sb-badge {reg_cls}">{regime}</span>
+        <span class="sb-iter">{ws_dot} #{s.get('iteration',0)} · {dry_badge}</span>
+    </div>
+    """, unsafe_allow_html=True)
+
     # ── Metrics ──
-    balance     = float(s.get("balance", 0))
-    peak        = float(s.get("peak_balance", 0))
-    daily_pnl   = float(s.get("daily_pnl", 0))
-    total_pnl   = float(s.get("total_pnl", 0))
-    win_rate    = float(s.get("win_rate", 0))
-    drawdown    = float(s.get("drawdown", 0))
+    balance      = float(s.get("balance", 0))
+    peak         = float(s.get("peak_balance", 0))
+    daily_pnl    = float(s.get("daily_pnl", 0))
+    total_pnl    = float(s.get("total_pnl", 0))
+    win_rate     = float(s.get("win_rate", 0))
+    drawdown     = float(s.get("drawdown", 0))
     total_trades = int(s.get("total_trades", 0))
 
-    c1, c2, c3, c4, c5, c6 = st.columns(6)
-    c1.metric("Balance",      f"${balance:.2f}",    delta=f"peak ${peak:.2f}")
-    c2.metric("Daily PnL",    f"${daily_pnl:.2f}",  delta=f"{daily_pnl:+.2f}",
-              delta_color="normal" if daily_pnl >= 0 else "inverse")
-    c3.metric("Total PnL",    f"${total_pnl:.2f}",
-              delta_color="normal" if total_pnl >= 0 else "inverse")
-    c4.metric("Win Rate",     f"{win_rate:.1f}%")
-    c5.metric("Drawdown",     f"{drawdown:.1f}%", delta_color="inverse")
-    c6.metric("Total Trades", str(total_trades))
+    pnl_d_col = "#00CC96" if daily_pnl >= 0 else "#EF553B"
+    pnl_t_col = "#00CC96" if total_pnl >= 0 else "#EF553B"
+    dd_col    = "#EF553B" if drawdown > 5 else "#FFA15A" if drawdown > 2 else "#aaa"
+    mode_col  = "#FFA15A" if s.get("dry_run") else "#EF553B"
+    mode_lbl  = "DRY RUN" if s.get("dry_run") else "LIVE"
 
-    st.markdown("---")
+    st.markdown(f"""
+    <div class="metrics-row">
+      <div class="m-card">
+        <div class="m-label">Balance</div>
+        <div class="m-value">${balance:.2f}</div>
+        <div class="m-sub">peak ${peak:.2f}</div>
+      </div>
+      <div class="m-card">
+        <div class="m-label">Daily PnL</div>
+        <div class="m-value" style="color:{pnl_d_col}">${daily_pnl:+.2f}</div>
+      </div>
+      <div class="m-card">
+        <div class="m-label">Total PnL</div>
+        <div class="m-value" style="color:{pnl_t_col}">${total_pnl:+.2f}</div>
+      </div>
+      <div class="m-card">
+        <div class="m-label">Win Rate</div>
+        <div class="m-value">{win_rate:.1f}%</div>
+        <div class="m-sub">{total_trades} trades</div>
+      </div>
+      <div class="m-card">
+        <div class="m-label">Drawdown</div>
+        <div class="m-value" style="color:{dd_col}">{drawdown:.1f}%</div>
+      </div>
+      <div class="m-card">
+        <div class="m-label">Mode</div>
+        <div class="m-value" style="color:{mode_col}; font-size:.88rem">{mode_lbl}</div>
+        <div class="m-sub">iter #{s.get('iteration',0)}</div>
+      </div>
+    </div>
+    """, unsafe_allow_html=True)
 
     # ── Charts ──
     ch1, ch2 = st.columns([2, 1])
@@ -180,8 +336,9 @@ def live_panel():
                     line=dict(color="#00CC96", width=2),
                     fill="tozeroy", fillcolor="rgba(0,204,150,0.1)"
                 ))
-                fig_eq.update_layout(height=370, template="plotly_dark",
-                    xaxis_title="Waktu", yaxis_title="Equity ($)", hovermode="x unified")
+                fig_eq.update_layout(height=300, template="plotly_dark",
+                    xaxis_title="Waktu", yaxis_title="Equity ($)", hovermode="x unified",
+                    margin=dict(l=10, r=10, t=10, b=40))
                 st.plotly_chart(fig_eq, use_container_width=True)
             else:
                 st.info("Data trade tidak lengkap untuk equity curve.")
@@ -191,7 +348,8 @@ def live_panel():
             fig_eq    = go.Figure()
             fig_eq.add_trace(go.Scatter(x=dates, y=dummy_eq, mode="lines",
                 name="Equity (demo)", line=dict(color="#636EFA", width=2, dash="dash")))
-            fig_eq.update_layout(height=370, template="plotly_dark")
+            fig_eq.update_layout(height=300, template="plotly_dark",
+                margin=dict(l=10, r=10, t=10, b=10))
             st.plotly_chart(fig_eq, use_container_width=True)
             st.caption("⚠️ Menampilkan data demo — belum ada trade.")
 
@@ -217,7 +375,8 @@ def live_panel():
                 ],
             }
         ))
-        fig_g.update_layout(height=370, paper_bgcolor="#111", font={"color": "white"})
+        fig_g.update_layout(height=300, paper_bgcolor="#111", font={"color": "white"},
+            margin=dict(l=10, r=10, t=40, b=10))
         st.plotly_chart(fig_g, use_container_width=True)
         st.caption("✅ Adaptive ON" if s.get("adaptive_mode") else "⚪ Adaptive OFF")
 
