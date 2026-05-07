@@ -1505,7 +1505,7 @@ class RiskManager:
     def __init__(self, cfg: dict): self.cfg = cfg
 
     def calculate_levels(self, side: str, entry: float, atr: float, trend_power: int = 50, atr_pct: float = 0.0) -> dict:
-        c, sl_base, tp1_base = self.cfg, c.get("ATR_SL_MULT", 1.0), c.get("ATR_TP1_MULT", 2.5)
+        c = self.cfg; sl_base, tp1_base = c.get("ATR_SL_MULT", 1.0), c.get("ATR_TP1_MULT", 2.5)
         if c.get("DYNAMIC_LEVELS", True) and atr_pct > 0:
             high_vol, low_vol = c.get("HIGH_VOL_ATR_PCT", 1.5), c.get("LOW_VOL_ATR_PCT", 0.5)
             if atr_pct >= high_vol: sl_base, tp1_base = round(sl_base * 1.4, 2), round(tp1_base * 1.4, 2)
