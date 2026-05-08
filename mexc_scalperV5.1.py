@@ -2416,7 +2416,7 @@ class ScalperBotV5:
         self.price_feed = PriceFeed(self.cfg["SYMBOL"])
         self.spot_client = MEXCSpotClient(MEXC_API_KEY, MEXC_API_SECRET)
         self.state = BotState(); self.dry_run = self.cfg["DRY_RUN"]; self.run_dashboard = run_dashboard
-        self._pos_lock = threading.Lock() # Thread safety untuk positions
+        self._pos_lock = threading.RLock() # RLock: reentrant, mencegah deadlock saat _close_position dipanggil dari dalam _pos_lock
 
         active_cfg_key = MEXC_API_KEY or self.cfg.get("MEXC_API_KEY", "")
         active_cfg_secret = MEXC_API_SECRET or self.cfg.get("MEXC_API_SECRET", "")
@@ -3118,7 +3118,10 @@ class ScalperBotV5:
             positions_data = []; price = self.price_feed.get_price()
             with self._pos_lock:
                 for pos in list(self.state.positions):
-                    if not pos.closed: pnl_live = (price - pos.entry_price) * pos.quantity if pos.side == "LONG" else (pos.entry_price - price) * pos.quantity
+                    if pos.closed:
+                        pnl_live = pos.pnl
+                    else:
+                        pnl_live = (price - pos.entry_price) * pos.quantity if pos.side == "LONG" else (pos.entry_price - price) * pos.quantity
                     positions_data.append({**asdict(pos), "pnl_live": round(pnl_live, 4), "current_price": price})
             return jsonify({"symbol": self.cfg["SYMBOL"], "price": price, "balance": round(self.state.balance, 2), "real_balance": round(self.state.real_balance, 2),
                             "peak_balance": round(self.state.peak_balance, 2), "total_pnl": round(self.state.total_pnl, 4), "daily_pnl": round(self.state.daily_pnl, 4),
@@ -3156,7 +3159,7 @@ class ScalperBotV5:
             if mode in ("live", "all"): path = self.cfg.get("JOURNAL_FILE_LIVE", "scalper_journal_v4_live.csv"); TradeJournal(path)._ensure_header()
             log.info(f"[RESET] Journal direset: {reset}"); return jsonify({"ok": True, "reset": reset})
         host, port = self.cfg.get("DASHBOARD_HOST", "0.0.0.0"), self.cfg.get("DASHBOARD_PORT", 5001)
-        threading.Thread(target=lambda: app.run(host=host, port=port, debug=False, use_reloader=False), daemon=True, name="Dashboard").start()
+        import waitress; threading.Thread(target=lambda: waitress.serve(app, host=host, port=port, threads=8), daemon=True, name="Dashboard").start()
         log.info(f"Dashboard aktif di http://localhost:{port}")
 
 # ══════════════════════════════════════════════════════════════
