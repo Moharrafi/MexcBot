@@ -3118,10 +3118,8 @@ class ScalperBotV5:
             positions_data = []; price = self.price_feed.get_price()
             with self._pos_lock:
                 for pos in list(self.state.positions):
-                    if pos.closed:
-                        pnl_live = pos.pnl
-                    else:
-                        pnl_live = (price - pos.entry_price) * pos.quantity if pos.side == "LONG" else (pos.entry_price - price) * pos.quantity
+                    if pos.closed: continue
+                    pnl_live = (price - pos.entry_price) * pos.quantity if pos.side == "LONG" else (pos.entry_price - price) * pos.quantity
                     positions_data.append({**asdict(pos), "pnl_live": round(pnl_live, 4), "current_price": price})
             return jsonify({"symbol": self.cfg["SYMBOL"], "price": price, "balance": round(self.state.balance, 2), "real_balance": round(self.state.real_balance, 2),
                             "peak_balance": round(self.state.peak_balance, 2), "total_pnl": round(self.state.total_pnl, 4), "daily_pnl": round(self.state.daily_pnl, 4),

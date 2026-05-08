@@ -235,7 +235,7 @@ if not is_online:
     st.error("Bot tidak bisa dijangkau di `http://localhost:5003`. Jalankan: `python mexc_scalperV5.1.py --dashboard`")
     st.stop()
 
-@st.fragment(run_every="15s")
+@st.fragment(run_every="5s")
 def live_panel():
     # Fetch data fresh di dalam fragment — tidak ganggu halaman lain
     s      = fetch("/api/status") or {}
@@ -340,7 +340,7 @@ def live_panel():
                     x=df_t[time_col], y=df_t["equity"],
                     mode="lines", name="Equity",
                     line=dict(color="#00CC96", width=2),
-                    fill="tozeroy", fillcolor="rgba(0,204,150,0.1)"
+                    fill="none" # Removed tozeroy to allow auto-zoom
                 ))
                 fig_eq.update_layout(height=300, template="plotly_dark",
                     xaxis_title="Waktu", yaxis_title="Equity ($)", hovermode="x unified",
@@ -369,10 +369,10 @@ def live_panel():
         rd = regime_map.get(s.get("adaptive_regime", "ACTIVE"), regime_map["ACTIVE"])
         fig_g = go.Figure(go.Indicator(
             mode="gauge+number", value=rd["value"],
-            title={"text": f"<b>{rd['label']}</b>", "font": {"size": 16, "color": "white"}},
+            title={"text": f"<b>{rd['label']}</b>", "font": {"size": 16}},
             gauge={
-                "axis": {"range": [0, 100], "tickcolor": "white"},
-                "bar": {"color": rd["color"]}, "bgcolor": "#111",
+                "axis": {"range": [0, 100]},
+                "bar": {"color": rd["color"]}, "bgcolor": "rgba(0,0,0,0)",
                 "borderwidth": 2, "bordercolor": "#444",
                 "steps": [
                     {"range": [0,  33], "color": "rgba(239,85,59,0.15)"},
@@ -381,14 +381,14 @@ def live_panel():
                 ],
             }
         ))
-        fig_g.update_layout(height=300, paper_bgcolor="#111", font={"color": "white"},
+        fig_g.update_layout(height=300, paper_bgcolor="rgba(0,0,0,0)",
             margin=dict(l=10, r=10, t=40, b=10))
         st.plotly_chart(fig_g, use_container_width=True)
         st.caption("✅ Adaptive ON" if s.get("adaptive_mode") else "⚪ Adaptive OFF")
 
     # ── Open Positions ──
     st.subheader("📊 Posisi Terbuka")
-    positions = s.get("positions", [])
+    positions = [p for p in s.get("positions", []) if not p.get("closed", False)]
     if positions:
         df_pos = pd.DataFrame(positions)
         dcols  = [c for c in ["symbol","side","entry_price","current_price",
@@ -426,8 +426,27 @@ def live_panel():
                                                ("adx","{:.1f}"),("price","${:.4f}"),
                                                ("vol_ratio","{:.2f}x")]
                            if c in show_sc}
-                st.dataframe(df_sc_s.head(15).style.format(fmt_sc),
-                             use_container_width=True, height=350)
+
+                def style_scanner(row):
+                    styles = [''] * len(row)
+                    # Signal column coloring
+                    if 'signal' in row.index:
+                        idx = row.index.get_loc('signal')
+                        if row['signal'] == 'LONG': styles[idx] = 'background-color: rgba(0,204,150,0.2); color: #00CC96; font-weight: bold'
+                        elif row['signal'] == 'SHORT': styles[idx] = 'background-color: rgba(239,85,59,0.2); color: #EF553B; font-weight: bold'
+                    
+                    # Highlight patokan (thresholds)
+                    if 'bull_score' in row.index and row['bull_score'] >= cfg_data.get('MIN_BULL_SCORE', 15):
+                        styles[row.index.get_loc('bull_score')] = 'color: #00CC96; font-weight: bold'
+                    if 'bear_score' in row.index and row['bear_score'] >= cfg_data.get('MIN_BEAR_SCORE', 15):
+                        styles[row.index.get_loc('bear_score')] = 'color: #EF553B; font-weight: bold'
+                    if 'adx' in row.index and row['adx'] >= cfg_data.get('ADX_MIN_THRESHOLD', 25):
+                        styles[row.index.get_loc('adx')] = 'color: #00CC96'
+                    
+                    return styles
+
+                styled_sc = df_sc_s.head(15).style.format(fmt_sc).apply(style_scanner, axis=1)
+                st.dataframe(styled_sc, use_container_width=True, height=350)
         else:
             st.info("Scanner belum ada data.")
 
@@ -460,7 +479,7 @@ def live_panel():
     st.caption(
         f"Symbol: `{s.get('symbol','?')}` | Iter #{s.get('iteration',0)} | "
         f"WS: {ws_icon} | {mode_label} | {datetime.now().strftime('%H:%M:%S')} "
-        f"— live update setiap 15s"
+        f"— live update setiap 5s"
     )
 
 live_panel()
