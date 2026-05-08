@@ -1579,7 +1579,11 @@ class SessionFilter:
 # TRADE JOURNAL
 # ══════════════════════════════════════════════════════════════
 class TradeJournal:
-    def __init__(self, filepath: str): self.filepath = filepath; self._ensure_header()
+    def __init__(self, filepath: str):
+        self.filepath = filepath
+        self._logged_ids: set = set()
+        self._ensure_header()
+        self._load_logged_ids()
     def _ensure_header(self):
         needs_header = not os.path.exists(self.filepath) or os.path.getsize(self.filepath) == 0
         if needs_header:
@@ -1589,7 +1593,19 @@ class TradeJournal:
                                         "opened_at", "closed_at", "close_reason", "bull_score",
                                         "bear_score", "confidence", "trailing_activated", "atr_at_entry",
                                         "is_early_entry", "st_dir", "roc", "willr"])
+    def _load_logged_ids(self):
+        if not os.path.exists(self.filepath): return
+        try:
+            with open(self.filepath, "r") as f:
+                for row in csv.DictReader(f):
+                    tid = row.get("trade_id", "")
+                    if tid: self._logged_ids.add(tid)
+        except Exception: pass
     def log_trade(self, pos: Position, exit_price: float, _signal: dict = None):
+        if pos.id in self._logged_ids:
+            log.warning(f"[JOURNAL] Duplikat dilewati: {pos.id} sudah tercatat")
+            return
+        self._logged_ids.add(pos.id)
         with open(self.filepath, "a", newline="") as f:
             csv.writer(f).writerow([pos.id, pos.symbol, pos.side, pos.entry_price, exit_price, pos.quantity,
                                     round(pos.pnl, 4), round(pos.fee, 4), pos.stop_loss, pos.take_profit1, pos.take_profit2,
@@ -2710,6 +2726,11 @@ class ScalperBotV5:
 
     def _open_position(self, signal: dict, entry_price: float):
         c = self.cfg; side = signal["signal"]; atr = signal["atr"]; symbol = c["SYMBOL"]
+        with self._pos_lock:
+            same_sym = [p for p in self.state.positions if not p.closed and p.symbol == symbol]
+        if same_sym:
+            log.info(f"[SKIP] Sudah ada {len(same_sym)} posisi terbuka di {symbol} — hindari double position")
+            return
         levels = self.risk.calculate_levels(side, entry_price, atr, atr_pct=signal.get("atr_pct", 0.0))
         if not self.risk.check_rr(levels): log.info(f"[SKIP] R:R terlalu rendah ({levels['rr_ratio']:.2f})"); return
         qty = self.risk.position_size(self.state.balance, levels["sl_distance"], entry_price, win_rate=self.state.win_rate()/100,
