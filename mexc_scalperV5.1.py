@@ -2613,6 +2613,9 @@ class ScalperBotV5:
         today = datetime.now(WIB).strftime("%Y-%m-%d")
         if self.state.daily_reset_date != today:
             self.state.daily_pnl = 0.0; self.state.daily_start_balance = self.state.balance; self.state.daily_reset_date = today
+            if self.state.circuit_breaker and self.state.circuit_type == "AUTO":
+                self.state.circuit_breaker = False; self.state.circuit_reason = ""; self.state.circuit_type = ""
+                log.info("[RESET] Circuit breaker direset otomatis — hari baru dimulai")
 
     def _check_circuit_breaker(self) -> bool:
         if self.state.circuit_breaker: return True
@@ -3163,6 +3166,12 @@ class ScalperBotV5:
             except Exception as e: return jsonify({"success": False, "error": str(e)})
         @app.route("/api/close_all", methods=["POST"])
         def close_all_route(): self.close_all_positions("Manual via API"); return jsonify({"success": True})
+        @app.route("/api/circuit/reset", methods=["POST"])
+        def circuit_reset():
+            self.state.circuit_breaker = False; self.state.circuit_reason = ""; self.state.circuit_type = ""; self.state.circuit_triggered_at = 0.0
+            self._state_dirty = True; log.info("[RESET] Circuit breaker direset manual via API")
+            self.notifier.send("🔓 *Circuit Breaker direset* (manual)")
+            return jsonify({"success": True, "message": "Circuit breaker direset"})
         @app.route("/api/scanner")
         def scanner_results(): return jsonify(self.scanner.get_results())
         @app.route("/api/journal")
