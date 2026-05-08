@@ -1810,6 +1810,7 @@ input:checked + .slider:before{transform:translateX(20px)}
 
 <div class="btn-row" style="padding-top:4px">
   <button class="btn btn-red" onclick="closeAll()">⛔ Close Semua Posisi</button>
+  <button id="btnResetCB" class="btn" onclick="resetCB()" style="display:none;background:#7c3aed;border:1px solid #a78bfa">🔓 Reset Circuit Breaker</button>
   <button class="btn btn-grey" onclick="refresh()">🔄 Refresh</button>
 </div>
 
@@ -2077,10 +2078,12 @@ async function refresh() {
     const botStatus = document.getElementById('botStatus');
     if (d.circuit_breaker) {
       botDot.className = 'dot dot-red';
-      botStatus.textContent = '⛔ Circuit Breaker Aktif';
+      botStatus.textContent = '⛔ Circuit Breaker Aktif — ' + (d.circuit_reason || '');
+      document.getElementById('btnResetCB').style.display = '';
     } else {
       botDot.className = 'dot dot-green';
       botStatus.textContent = 'Running — ' + d.symbol;
+      document.getElementById('btnResetCB').style.display = 'none';
     }
     document.getElementById('lastUpdate').textContent = 'Update: ' + new Date().toLocaleTimeString('id-ID');
   } catch(e) {
@@ -2123,6 +2126,15 @@ async function closeAll() {
     toast('Semua posisi ditutup');
     refresh();
   } catch(e) { toast('Gagal menutup posisi', false); }
+}
+async function resetCB() {
+  if (!confirm('Reset Circuit Breaker? Bot akan mulai trading kembali.')) return;
+  try {
+    const r = await fetch('/api/circuit/reset', {method:'POST'});
+    const d = await r.json();
+    if (d.success) { toast('Circuit Breaker direset — bot aktif kembali'); refresh(); }
+    else toast('Gagal reset CB', false);
+  } catch(e) { toast('Gagal reset CB', false); }
 }
 
 // ══════════════════════════════════════
